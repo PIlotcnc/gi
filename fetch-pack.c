@@ -23,6 +23,7 @@
 #include "fetch-negotiator.h"
 #include "fsck.h"
 #include "shallow.h"
+#include "commit-reach.h"
 
 static int transfer_unpack_limit = -1;
 static int fetch_unpack_limit = -1;
@@ -45,6 +46,8 @@ static struct string_list uri_protocols = STRING_LIST_INIT_DUP;
 /* Remember to update object flag allocation in object.h */
 #define COMPLETE	(1U << 0)
 #define ALTERNATE	(1U << 1)
+#define COMMON		(1U << 6)
+#define REACH_SCRATCH	(1U << 7)
 
 /*
  * After sending this many "have"s if we do not get any new ACK , we
@@ -1523,10 +1526,10 @@ enum fetch_state {
 	FETCH_DONE,
 };
 
-static void do_check_stateless_delimiter(const struct fetch_pack_args *args,
+static void do_check_stateless_delimiter(int stateless_rpc,
 					 struct packet_reader *reader)
 {
-	check_stateless_delimiter(args->stateless_rpc, reader,
+	check_stateless_delimiter(stateless_rpc, reader,
 				  _("git fetch-pack: expected response end packet"));
 }
 
@@ -1622,7 +1625,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 				 */
 				state = FETCH_GET_PACK;
 			} else {
-				do_check_stateless_delimiter(args, &reader);
+				do_check_stateless_delimiter(args->stateless_rpc, &reader);
 				state = FETCH_SEND_REQUEST;
 			}
 			break;
@@ -1645,7 +1648,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 				     packfile_uris.nr ? &index_pack_args : NULL,
 				     sought, nr_sought, &fsck_options.gitmodules_found))
 				die(_("git fetch-pack: fetch failed."));
-			do_check_stateless_delimiter(args, &reader);
+			do_check_stateless_delimiter(args->stateless_rpc, &reader);
 
 			state = FETCH_DONE;
 			break;
@@ -1960,6 +1963,84 @@ cleanup:
 	clear_shallow_info(&si);
 	oid_array_clear(&shallows_scratch);
 	return ref_cpy;
+}
+
+static int add_to_object_array(const struct object_id *oid, void *data)
+{
+	struct object_array *a = data;
+
+	add_object_array(parse_object(the_repository, oid), "", a);
+	return 0;
+}
+
+void negotiate_using_fetch(const struct oid_array *negotiation_tips,
+			   const struct string_list *server_options,
+			   int stateless_rpc,
+			   int fd[],
+			   struct oidset *acked_commits)
+{
+	struct fetch_negotiator negotiator;
+	struct packet_reader reader;
+	struct object_array nt_object_array = OBJECT_ARRAY_INIT;
+	struct strbuf req_buf = STRBUF_INIT;
+	int haves_to_send = INITIAL_FLUSH;
+	int in_vain = 0;
+	int seen_ack = 0;
+	int last_iteration = 0;
+
+	fetch_negotiator_init(the_repository, &negotiator);
+	mark_tips(&negotiator, negotiation_tips);
+
+	packet_reader_init(&reader, fd[0], NULL, 0,
+			   PACKET_READ_CHOMP_NEWLINE |
+			   PACKET_READ_DIE_ON_ERR_PACKET);
+
+	oid_array_for_each((struct oid_array *) negotiation_tips,
+			   add_to_object_array,
+			   &nt_object_array);
+
+	while (!last_iteration) {
+		int haves_added;
+		struct object_id common_oid;
+		int received_ready = 0;
+
+		strbuf_reset(&req_buf);
+		write_fetch_command_and_capabilities(&req_buf, server_options);
+
+		packet_buf_write(&req_buf, "wait-for-done");
+
+		haves_added = add_haves(&negotiator, &req_buf, &haves_to_send);
+		in_vain += haves_added;
+		if (!haves_added || (seen_ack && in_vain >= MAX_IN_VAIN))
+			last_iteration = 1;
+
+		/* Send request */
+		packet_buf_flush(&req_buf);
+		if (write_in_full(fd[1], req_buf.buf, req_buf.len) < 0)
+			die_errno(_("unable to write request to remote"));
+
+		/* Process ACKs/NAKs */
+		process_section_header(&reader, "acknowledgments", 0);
+		while (process_ack(&negotiator, &reader, &common_oid,
+				   &received_ready)) {
+			struct commit *commit = lookup_commit(the_repository,
+							      &common_oid);
+			if (commit)
+				commit->object.flags |= COMMON;
+			in_vain = 0;
+			seen_ack = 1;
+			oidset_insert(acked_commits, &common_oid);
+		}
+		if (received_ready)
+			die(_("unexpected 'ready' from remote"));
+		else
+			do_check_stateless_delimiter(stateless_rpc, &reader);
+		if (can_all_from_reach_with_flag(&nt_object_array, COMMON,
+						 REACH_SCRATCH, 0,
+						 GENERATION_NUMBER_ZERO))
+			last_iteration = 1;
+	}
+	strbuf_release(&req_buf);
 }
 
 int report_unmatched_refs(struct ref **sought, int nr_sought)
