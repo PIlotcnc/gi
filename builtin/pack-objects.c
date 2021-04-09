@@ -984,7 +984,17 @@ static void write_reused_pack(struct hashfile *f)
 				break;
 
 			offset += ewah_bit_ctz64(word >> offset);
-			write_reused_pack_one(pos + offset, f, &w_curs);
+			if (bitmap_is_midx(bitmap_git)) {
+				off_t pack_offs = bitmap_pack_offset(bitmap_git,
+								     pos + offset);
+				uint32_t pos;
+
+				if (offset_to_pack_pos(reuse_packfile, pack_offs, &pos) < 0)
+					die(_("write_reused_pack: could not locate %"PRIdMAX),
+					    (intmax_t)pack_offs);
+				write_reused_pack_one(pos, f, &w_curs);
+			} else
+				write_reused_pack_one(pos + offset, f, &w_curs);
 			display_progress(progress_state, ++written);
 		}
 	}
