@@ -63,7 +63,7 @@ static const struct object_id empty_blob_oid = {
 	EMPTY_BLOB_SHA1_BIN_LITERAL,
 	GIT_HASH_SHA1,
 };
-const struct object_id null_oid_sha1 = {
+static const struct object_id null_oid_sha1 = {
 	{0}, GIT_HASH_SHA1,
 };
 static const struct object_id empty_tree_oid_sha256 = {
