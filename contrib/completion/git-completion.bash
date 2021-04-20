@@ -3016,22 +3016,22 @@ _git_stash ()
 	local subcommands='push list show apply clear drop pop create branch'
 	local subcommand="$(__git_find_on_cmdline "$subcommands save")"
 
-	if [ -z "$subcommand" ]; then
-		case "$((cword - __git_cmd_idx)),$cur" in
-		*,--*)
-			__gitcomp_builtin stash_push
-			;;
-		1,sa*)
-			__gitcomp "save"
-			;;
-		1,*)
-			__gitcomp "$subcommands"
-			;;
-		esac
-		return
-	fi
-
 	case "$subcommand,$cur" in
+	,--*)
+		__gitcomp_builtin stash_save
+		;;
+	,sa*)
+		__git_init_builtin_opts stash_save
+		if ((cword - __git_cmd_idx == 1)); then
+			__gitcomp "save"
+		fi
+		;;
+	,*)
+		__git_init_builtin_opts stash_save
+		if ((cword - __git_cmd_idx == 1)); then
+			__gitcomp "$subcommands"
+		fi
+		;;
 	list,--*)
 		# NEEDSWORK: can we somehow unify this with the options in _git_log() and _git_show()
 		__gitcomp_builtin stash_list "$__git_log_common_options $__git_diff_common_options"
